@@ -15,9 +15,13 @@ on:
         required: true
         default: caas_embedded
       platform:
-        description: Platform
+        description: Platform (try "linux" or "container")
         required: true
         default: linux
+      config_file_mode:
+        description: How to send config_file — "name" (string) or "yaml" (inline YAML body)
+        required: true
+        default: name
       config_file:
         description: yaml_preferences.config_file value (required for caas_embedded). Try "default" first, or check Cortex console.
         required: false
@@ -62,12 +66,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          # If config_file_mode == yaml, treat config_file as inline YAML body
+          CFG_VAL="${{ inputs.config_file }}"
+          if [ "${{ inputs.config_file_mode }}" = "yaml" ] && [ "$CFG_VAL" = "default" ]; then
+            # Provide a minimal default YAML body when caller forgot to override
+            CFG_VAL=$'# minimal embedded agent yaml\nagent_settings:\n  enabled: true\n'
+          fi
+
           BODY=$(jq -n \
             --arg name "${{ inputs.name }}" \
             --arg pkg  "${{ inputs.package_type }}" \
             --arg plat "${{ inputs.platform }}" \
             --arg ver  "${{ inputs.agent_version }}" \
-            --arg cfg  "${{ inputs.config_file }}" \
+            --arg cfg  "$CFG_VAL" \
             '{request_data: ({
                 name: $name,
                 package_type: $pkg,
