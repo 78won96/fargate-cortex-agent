@@ -1,0 +1,174 @@
+name: Stage 3 - Deploy ECS Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: ECR image tag to deploy (e.g. short SHA or "latest")
+        required: true
+        default: latest
+      project_name:
+        description: Resource name prefix (must match cluster stack)
+        required: true
+        default: fargate-nginx
+      aws_region:
+        description: AWS region
+        required: true
+        default: ap-northeast-2
+      desired_count:
+        description: Number of running tasks
+        required: true
+        default: '1'
+  workflow_call:
+    inputs:
+      image_tag:
+        type: string
+        required: true
+      project_name:
+        type: string
+        default: fargate-nginx
+      aws_region:
+        type: string
+        default: ap-northeast-2
+      desired_count:
+        type: string
+        default: '1'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PROJECT_NAME: ${{ inputs.project_name }}
+  AWS_REGION: ${{ inputs.aws_region }}
+  CLUSTER_STACK: ${{ inputs.project_name }}-cluster
+  SERVICE_STACK: ${{ inputs.project_name }}-service
+
+jobs:
+  deploy:
+    name: Deploy service stack
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify cluster stack exists
+        id: cluster
+        run: |
+          set -euo pipefail
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.CLUSTER_STACK }}" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "MISSING")
+          if [ "$STATUS" = "MISSING" ]; then
+            echo "::error::Cluster stack '${{ env.CLUSTER_STACK }}' not found. Run Stage 1 first."
+            exit 1
+          fi
+          echo "Cluster stack status: $STATUS"
+
+          OUTPUTS_JSON=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.CLUSTER_STACK }}" \
+            --query 'Stacks[0].Outputs' --output json)
+          CLUSTER_NAME=$(echo "$OUTPUTS_JSON" | jq -r '.[] | select(.OutputKey=="ClusterName").OutputValue')
+          ECR_URI=$(echo "$OUTPUTS_JSON" | jq -r '.[] | select(.OutputKey=="EcrRepositoryUri").OutputValue')
+          ALB_DNS=$(echo "$OUTPUTS_JSON" | jq -r '.[] | select(.OutputKey=="LoadBalancerDnsName").OutputValue')
+          {
+            echo "name=$CLUSTER_NAME"
+            echo "ecr=$ECR_URI"
+            echo "alb=$ALB_DNS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify image tag exists in ECR
+        run: |
+          set -euo pipefail
+          aws ecr describe-images \
+            --repository-name "${{ env.PROJECT_NAME }}" \
+            --image-ids imageTag=${{ inputs.image_tag }} >/dev/null
+          echo "Image ${{ env.PROJECT_NAME }}:${{ inputs.image_tag }} found in ECR."
+
+      - name: Deploy service stack
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${{ steps.cluster.outputs.ecr }}:${{ inputs.image_tag }}"
+          echo "Deploying image: $IMAGE_URI"
+          aws cloudformation deploy \
+            --stack-name "${{ env.SERVICE_STACK }}" \
+            --template-file infrastructure/service.yaml \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              ProjectName=${{ env.PROJECT_NAME }} \
+              ImageUri="$IMAGE_URI" \
+              DesiredCount=${{ inputs.desired_count }}
+
+      - name: Wait for service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "${{ steps.cluster.outputs.name }}" \
+            --services "${{ env.PROJECT_NAME }}-svc"
+
+      - name: Show service status
+        run: |
+          aws ecs describe-services \
+            --cluster "${{ steps.cluster.outputs.name }}" \
+            --services "${{ env.PROJECT_NAME }}-svc" \
+            --query 'services[0].{Status:status,Desired:desiredCount,Running:runningCount,Pending:pendingCount,TaskDefinition:taskDefinition,LastDeployment:deployments[0].rolloutState}' \
+            --output table
+
+      - name: Wait for target group to report healthy
+        run: |
+          set -euo pipefail
+          TG_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.CLUSTER_STACK }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TargetGroupArn'].OutputValue" \
+            --output text)
+          for i in $(seq 1 30); do
+            STATES=$(aws elbv2 describe-target-health \
+              --target-group-arn "$TG_ARN" \
+              --query 'TargetHealthDescriptions[].TargetHealth.State' \
+              --output text)
+            echo "attempt $i: target states = ${STATES:-<empty>}"
+            HEALTHY=$(echo "$STATES" | tr ' ' '\n' | grep -c '^healthy$' || true)
+            if [ "$HEALTHY" -ge 1 ]; then
+              echo "At least one healthy target."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::No healthy targets after 5 minutes"
+          aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --output table
+          exit 1
+
+      - name: Publish endpoint
+        id: endpoint
+        run: |
+          URL="http://${{ steps.cluster.outputs.alb }}/"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Deployment ready"
+            echo ""
+            echo "- **Image tag:** \`${{ inputs.image_tag }}\`"
+            echo "- **ALB endpoint:** $URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test endpoint
+        run: |
+          set -euo pipefail
+          URL="${{ steps.endpoint.outputs.url }}"
+          echo "Probing $URL ..."
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 5 "$URL" >/dev/null; then
+              echo "OK: service responded on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::Service did not respond at $URL"
+          exit 1

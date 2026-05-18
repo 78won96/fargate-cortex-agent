@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Stage 3 - ECS Fargate Service for the nginx app.
+  Consumes Exports produced by the Stage 1 cluster stack and
+  runs the image tag passed in via the ImageUri parameter.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: fargate-nginx
+    Description: Must match the ProjectName used by the cluster stack.
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI including tag (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/fargate-nginx:abcdef1)
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+  ContainerPort:
+    Type: Number
+    Default: 80
+  Cpu:
+    Type: String
+    Default: '256'
+    AllowedValues: ['256', '512', '1024', '2048', '4096']
+  Memory:
+    Type: String
+    Default: '512'
+    AllowedValues: ['512', '1024', '2048', '3072', '4096', '8192']
+
+Resources:
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ProjectName}-task
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub ${ProjectName}-TaskExecRoleArn
+      TaskRoleArn:
+        Fn::ImportValue: !Sub ${ProjectName}-TaskRoleArn
+      ContainerDefinitions:
+        - Name: nginx
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - wget -qO- http://localhost/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group:
+                Fn::ImportValue: !Sub ${ProjectName}-LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: nginx
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${ProjectName}-svc
+      Cluster:
+        Fn::ImportValue: !Sub ${ProjectName}-ClusterName
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableExecuteCommand: true
+      PropagateTags: SERVICE
+      HealthCheckGracePeriodSeconds: 30
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            Fn::Split:
+              - ","
+              - Fn::ImportValue: !Sub ${ProjectName}-PublicSubnets
+          SecurityGroups:
+            - Fn::ImportValue: !Sub ${ProjectName}-ServiceSgId
+      LoadBalancers:
+        - ContainerName: nginx
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn:
+            Fn::ImportValue: !Sub ${ProjectName}-TargetGroupArn
+
+Outputs:
+  ServiceName:
+    Value: !GetAtt Service.Name
+    Export:
+      Name: !Sub ${ProjectName}-ServiceName
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+    Export:
+      Name: !Sub ${ProjectName}-TaskDefArn

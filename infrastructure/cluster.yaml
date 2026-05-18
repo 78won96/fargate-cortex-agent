@@ -1,0 +1,308 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Stage 1 - ECS Fargate Cluster foundation.
+  Provisions VPC, public subnets, ECS cluster, ECR repository,
+  IAM roles and CloudWatch log group required for later deploy stages.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: fargate-nginx
+    Description: Prefix used to name all resources.
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.20.1.0/24
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.20.2.0/24
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 7, 14, 30, 60, 90]
+
+Resources:
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-igw
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-alb-sg
+      GroupDescription: Internet-facing ALB ingress
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from anywhere
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-alb-sg
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-svc-sg
+      GroupDescription: Allow inbound HTTP only from the ALB
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: HTTP from ALB only
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-svc-sg
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${ProjectName}-alb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ProjectName}-tg
+      VpcId: !Ref Vpc
+      Port: 80
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20'
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${ProjectName}-cluster
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ProjectName}
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThanN",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-task-exec-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-task-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${ProjectName}
+      RetentionInDays: !Ref LogRetentionDays
+
+Outputs:
+  ClusterName:
+    Description: ECS cluster name
+    Value: !Ref EcsCluster
+    Export:
+      Name: !Sub ${ProjectName}-ClusterName
+  ClusterArn:
+    Value: !GetAtt EcsCluster.Arn
+    Export:
+      Name: !Sub ${ProjectName}-ClusterArn
+  VpcId:
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub ${ProjectName}-VpcId
+  PublicSubnets:
+    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+    Export:
+      Name: !Sub ${ProjectName}-PublicSubnets
+  ServiceSecurityGroupId:
+    Value: !Ref ServiceSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-ServiceSgId
+  EcrRepositoryUri:
+    Value: !GetAtt EcrRepository.RepositoryUri
+    Export:
+      Name: !Sub ${ProjectName}-EcrUri
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-TaskExecRoleArn
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-TaskRoleArn
+  LogGroupName:
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub ${ProjectName}-LogGroup
+  LoadBalancerDnsName:
+    Description: Public DNS for the ALB
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name: !Sub ${ProjectName}-AlbDnsName
+  LoadBalancerArn:
+    Value: !Ref LoadBalancer
+    Export:
+      Name: !Sub ${ProjectName}-AlbArn
+  TargetGroupArn:
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub ${ProjectName}-TargetGroupArn
+  ListenerArn:
+    Value: !Ref HttpListener
+    Export:
+      Name: !Sub ${ProjectName}-ListenerArn

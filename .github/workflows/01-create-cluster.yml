@@ -1,0 +1,129 @@
+name: Stage 1 - Create ECS Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_name:
+        description: Resource name prefix
+        required: true
+        default: fargate-nginx
+      aws_region:
+        description: AWS region to deploy into
+        required: true
+        default: ap-northeast-2
+  push:
+    branches: [main]
+    paths:
+      - infrastructure/cluster.yaml
+      - .github/workflows/01-create-cluster.yml
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  STACK_NAME: ${{ github.event.inputs.project_name || 'fargate-nginx' }}-cluster
+  PROJECT_NAME: ${{ github.event.inputs.project_name || 'fargate-nginx' }}
+  AWS_REGION: ${{ github.event.inputs.aws_region || 'ap-northeast-2' }}
+  TEMPLATE_PATH: infrastructure/cluster.yaml
+
+jobs:
+  validate:
+    name: Validate template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate CloudFormation template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://${{ env.TEMPLATE_PATH }}
+
+      - name: Lint with cfn-lint
+        uses: scottbrenner/cfn-lint-action@v2
+        with:
+          command: cfn-lint ${{ env.TEMPLATE_PATH }}
+
+  deploy:
+    name: Deploy cluster stack
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create change set (preview diff)
+        id: changeset
+        run: |
+          set -e
+          CHANGE_SET_NAME="cs-$(date +%s)"
+          echo "name=$CHANGE_SET_NAME" >> "$GITHUB_OUTPUT"
+
+          STACK_EXISTS=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NONE")
+
+          if [ "$STACK_EXISTS" = "NONE" ]; then
+            CHANGE_SET_TYPE=CREATE
+          else
+            CHANGE_SET_TYPE=UPDATE
+          fi
+          echo "type=$CHANGE_SET_TYPE" >> "$GITHUB_OUTPUT"
+
+          aws cloudformation create-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type "$CHANGE_SET_TYPE" \
+            --template-body file://${{ env.TEMPLATE_PATH }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameters ParameterKey=ProjectName,ParameterValue=${{ env.PROJECT_NAME }}
+
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "$CHANGE_SET_NAME" || true
+
+          aws cloudformation describe-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --query 'Changes[].ResourceChange.{Action:Action,Type:ResourceType,LogicalId:LogicalResourceId,Replacement:Replacement}' \
+            --output table
+
+      - name: Execute change set
+        run: |
+          aws cloudformation execute-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.name }}"
+
+          if [ "${{ steps.changeset.outputs.type }}" = "CREATE" ]; then
+            aws cloudformation wait stack-create-complete --stack-name "${{ env.STACK_NAME }}"
+          else
+            aws cloudformation wait stack-update-complete --stack-name "${{ env.STACK_NAME }}"
+          fi
+
+      - name: Publish stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --query 'Stacks[0].Outputs' \
+            --output table | tee outputs.txt
+
+      - name: Upload outputs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-outputs
+          path: outputs.txt
+          retention-days: 30
