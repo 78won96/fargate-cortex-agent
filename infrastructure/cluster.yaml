@@ -211,7 +211,7 @@ Resources:
                 "description": "Keep last 10 images",
                 "selection": {
                   "tagStatus": "any",
-                  "countType": "imageCountMoreThanN",
+                  "countType": "imageCountMoreThan",
                   "countNumber": 10
                 },
                 "action": { "type": "expire" }
