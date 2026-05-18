@@ -41,7 +41,12 @@ jobs:
           [ -n "$CORTEX_FQDN" ] || { echo "::error::CORTEX_FQDN secret missing"; exit 1; }
           [ -n "$CORTEX_API_KEY" ] || { echo "::error::CORTEX_API_KEY secret missing"; exit 1; }
           [ -n "$CORTEX_API_KEY_ID" ] || { echo "::error::CORTEX_API_KEY_ID secret missing"; exit 1; }
-          echo "FQDN host: $(echo $CORTEX_FQDN | sed 's/\..*$/.<redacted>/')"
+
+          # Normalize FQDN: strip leading scheme and trailing slashes
+          FQDN_CLEAN=$(echo "$CORTEX_FQDN" | sed -E 's#^https?://##; s#/+$##')
+          echo "CORTEX_FQDN_CLEAN=$FQDN_CLEAN" >> "$GITHUB_ENV"
+
+          echo "FQDN host       : $(echo $FQDN_CLEAN | sed 's/\..*$/.<redacted>/')"
           echo "Probe name      : ${{ inputs.name }}"
           echo "Package type    : ${{ inputs.package_type }}"
           echo "Platform        : ${{ inputs.platform }}"
@@ -72,7 +77,7 @@ jobs:
           echo "$BODY" | jq .
 
           HTTP_CODE=$(curl -sS -o /tmp/create_resp.json -w '%{http_code}' \
-            -X POST "https://${CORTEX_FQDN}/public_api/v1/distributions/create" \
+            -X POST "https://${CORTEX_FQDN_CLEAN}/public_api/v1/distributions/create" \
             -H "Authorization: ${CORTEX_API_KEY}" \
             -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
             -H "Content-Type: application/json" \
@@ -113,7 +118,7 @@ jobs:
           FINAL_STATUS=""
           for i in $(seq 1 "$ATTEMPTS"); do
             HTTP_CODE=$(curl -sS -o /tmp/status_resp.json -w '%{http_code}' \
-              -X POST "https://${CORTEX_FQDN}/public_api/v1/distributions/get_status" \
+              -X POST "https://${CORTEX_FQDN_CLEAN}/public_api/v1/distributions/get_status" \
               -H "Authorization: ${CORTEX_API_KEY}" \
               -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
               -H "Content-Type: application/json" \
@@ -163,7 +168,7 @@ jobs:
             '{request_data: {distribution_id: $id, package_type: "${{ inputs.package_type }}"}}')
 
           HTTP_CODE=$(curl -sS -o /tmp/url_resp.json -w '%{http_code}' \
-            -X POST "https://${CORTEX_FQDN}/public_api/v1/distributions/get_dist_url" \
+            -X POST "https://${CORTEX_FQDN_CLEAN}/public_api/v1/distributions/get_dist_url" \
             -H "Authorization: ${CORTEX_API_KEY}" \
             -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
             -H "Content-Type: application/json" \
