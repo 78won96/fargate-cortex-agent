@@ -1,0 +1,192 @@
+name: Cortex - Probe Create Distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent_version:
+        description: Cortex agent version (e.g. 9.2.0.12345) — must exist in your tenant
+        required: true
+      name:
+        description: Distribution name
+        required: true
+        default: fargate-nginx-probe
+      package_type:
+        description: Package type to test
+        required: true
+        default: caas_embedded
+      platform:
+        description: Platform
+        required: true
+        default: linux
+      poll_attempts:
+        description: How many times to poll status (every 15s)
+        required: true
+        default: '20'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe distribution API
+    runs-on: ubuntu-latest
+    env:
+      CORTEX_FQDN: ${{ secrets.CORTEX_FQDN }}
+      CORTEX_API_KEY: ${{ secrets.CORTEX_API_KEY }}
+      CORTEX_API_KEY_ID: ${{ secrets.CORTEX_API_KEY_ID }}
+    steps:
+      - name: Sanity check inputs and secrets
+        run: |
+          set -euo pipefail
+          [ -n "$CORTEX_FQDN" ] || { echo "::error::CORTEX_FQDN secret missing"; exit 1; }
+          [ -n "$CORTEX_API_KEY" ] || { echo "::error::CORTEX_API_KEY secret missing"; exit 1; }
+          [ -n "$CORTEX_API_KEY_ID" ] || { echo "::error::CORTEX_API_KEY_ID secret missing"; exit 1; }
+          echo "FQDN host: $(echo $CORTEX_FQDN | sed 's/\..*$/.<redacted>/')"
+          echo "Probe name      : ${{ inputs.name }}"
+          echo "Package type    : ${{ inputs.package_type }}"
+          echo "Platform        : ${{ inputs.platform }}"
+          echo "Agent version   : ${{ inputs.agent_version }}"
+          echo "Poll attempts   : ${{ inputs.poll_attempts }} (15s each)"
+
+      - name: POST /distributions/create
+        id: create
+        run: |
+          set -euo pipefail
+
+          BODY=$(jq -n \
+            --arg name "${{ inputs.name }}" \
+            --arg pkg  "${{ inputs.package_type }}" \
+            --arg plat "${{ inputs.platform }}" \
+            --arg ver  "${{ inputs.agent_version }}" \
+            '{request_data: {
+                name: $name,
+                package_type: $pkg,
+                platform: $plat,
+                agent_version: $ver,
+                run_on_master_node: false,
+                run_on_all_nodes: false,
+                description: "Probe call from GitHub Actions"
+            }}')
+
+          echo "--- Request body ---"
+          echo "$BODY" | jq .
+
+          HTTP_CODE=$(curl -sS -o /tmp/create_resp.json -w '%{http_code}' \
+            -X POST "https://${CORTEX_FQDN}/public_api/v1/distributions/create" \
+            -H "Authorization: ${CORTEX_API_KEY}" \
+            -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data "$BODY")
+
+          echo "--- HTTP $HTTP_CODE ---"
+          echo "--- Response body ---"
+          if jq -e . /tmp/create_resp.json >/dev/null 2>&1; then
+            jq . /tmp/create_resp.json
+          else
+            cat /tmp/create_resp.json
+          fi
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Create call failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          DIST_ID=$(jq -r '.reply.distribution_id // empty' /tmp/create_resp.json)
+          if [ -z "$DIST_ID" ]; then
+            echo "::error::Response did not include distribution_id"
+            exit 1
+          fi
+          echo "distribution_id=$DIST_ID" >> "$GITHUB_OUTPUT"
+          echo "Captured distribution_id: $DIST_ID"
+
+      - name: POST /distributions/get_status (poll)
+        id: status
+        run: |
+          set -euo pipefail
+          DIST_ID="${{ steps.create.outputs.distribution_id }}"
+          ATTEMPTS=${{ inputs.poll_attempts }}
+
+          STATUS_BODY=$(jq -n --arg id "$DIST_ID" \
+            '{request_data: {distribution_id: $id}}')
+
+          FINAL_STATUS=""
+          for i in $(seq 1 "$ATTEMPTS"); do
+            HTTP_CODE=$(curl -sS -o /tmp/status_resp.json -w '%{http_code}' \
+              -X POST "https://${CORTEX_FQDN}/public_api/v1/distributions/get_status" \
+              -H "Authorization: ${CORTEX_API_KEY}" \
+              -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
+              --data "$STATUS_BODY")
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "::warning::get_status returned HTTP $HTTP_CODE on attempt $i"
+              cat /tmp/status_resp.json
+              sleep 15
+              continue
+            fi
+
+            STATUS=$(jq -r '.reply.status // .reply // empty' /tmp/status_resp.json)
+            echo "attempt $i — status: ${STATUS:-<empty>}"
+
+            case "$STATUS" in
+              Ready|Completed|completed|ready|Success|success)
+                FINAL_STATUS="$STATUS"
+                break
+                ;;
+              Failed|failed|Error|error)
+                echo "::error::Distribution build failed"
+                jq . /tmp/status_resp.json
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+
+          echo "--- Final status response ---"
+          jq . /tmp/status_resp.json || cat /tmp/status_resp.json
+
+          if [ -z "$FINAL_STATUS" ]; then
+            echo "::warning::Did not reach a terminal state after $ATTEMPTS attempts. Inspect response above and re-run with larger poll_attempts if needed."
+            exit 0
+          fi
+          echo "status=$FINAL_STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: POST /distributions/get_dist_url
+        if: steps.status.outputs.status != ''
+        run: |
+          set -euo pipefail
+          DIST_ID="${{ steps.create.outputs.distribution_id }}"
+
+          URL_BODY=$(jq -n --arg id "$DIST_ID" \
+            '{request_data: {distribution_id: $id, package_type: "${{ inputs.package_type }}"}}')
+
+          HTTP_CODE=$(curl -sS -o /tmp/url_resp.json -w '%{http_code}' \
+            -X POST "https://${CORTEX_FQDN}/public_api/v1/distributions/get_dist_url" \
+            -H "Authorization: ${CORTEX_API_KEY}" \
+            -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data "$URL_BODY")
+
+          echo "--- HTTP $HTTP_CODE ---"
+          echo "--- Response body (download URL itself may be sensitive — handle with care) ---"
+          if jq -e . /tmp/url_resp.json >/dev/null 2>&1; then
+            # Mask any URL-looking field so the literal URL isn't printed in plain text
+            jq '(.. | strings) |= (if test("^https?://") then "***download-url-redacted***" else . end)' /tmp/url_resp.json
+          else
+            cat /tmp/url_resp.json
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Cortex API probe"
+            echo ""
+            echo "- **package_type:** \`${{ inputs.package_type }}\`"
+            echo "- **agent_version:** \`${{ inputs.agent_version }}\`"
+            echo "- **distribution_id:** \`${{ steps.create.outputs.distribution_id || 'n/a' }}\`"
+            echo "- **status:** \`${{ steps.status.outputs.status || 'n/a' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
