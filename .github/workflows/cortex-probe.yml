@@ -18,6 +18,10 @@ on:
         description: Platform
         required: true
         default: linux
+      config_file:
+        description: yaml_preferences.config_file value (required for caas_embedded). Try "default" first, or check Cortex console.
+        required: false
+        default: default
       poll_attempts:
         description: How many times to poll status (every 15s)
         required: true
@@ -63,7 +67,8 @@ jobs:
             --arg pkg  "${{ inputs.package_type }}" \
             --arg plat "${{ inputs.platform }}" \
             --arg ver  "${{ inputs.agent_version }}" \
-            '{request_data: {
+            --arg cfg  "${{ inputs.config_file }}" \
+            '{request_data: ({
                 name: $name,
                 package_type: $pkg,
                 platform: $plat,
@@ -71,7 +76,9 @@ jobs:
                 run_on_master_node: false,
                 run_on_all_nodes: false,
                 description: "Probe call from GitHub Actions"
-            }}')
+            } + (if ($cfg | length) > 0
+                 then {yaml_preferences: {config_file: $cfg}}
+                 else {} end))}')
 
           echo "--- Request body ---"
           echo "$BODY" | jq .
