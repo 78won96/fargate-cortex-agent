@@ -21,11 +21,11 @@ Parameters:
     Default: 80
   Cpu:
     Type: String
-    Default: '1024'
+    Default: '2048'
     AllowedValues: ['256', '512', '1024', '2048', '4096']
   Memory:
     Type: String
-    Default: '2048'
+    Default: '4096'
     AllowedValues: ['512', '1024', '2048', '3072', '4096', '8192']
 
 Resources:
@@ -78,7 +78,7 @@ Resources:
       PlatformVersion: LATEST
       EnableExecuteCommand: true
       PropagateTags: SERVICE
-      HealthCheckGracePeriodSeconds: 60
+      HealthCheckGracePeriodSeconds: 300
       DeploymentConfiguration:
         MaximumPercent: 200
         MinimumHealthyPercent: 100
