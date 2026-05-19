@@ -108,8 +108,8 @@ Resources:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: HTTP from anywhere
+          CidrIp: 59.10.109.178/32
+          Description: HTTP from tester (juwon.lee)
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-alb-sg
