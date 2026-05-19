@@ -1,4 +1,4 @@
-FROM distributions.traps.paloaltonetworks.com/agent-docker-pull/94b9b95de7b14952ba1dc3cc7873787d/method:9.2.0.86 AS cortex_agent
+FROM distributions.traps.paloaltonetworks.com/agent-docker-pull/805924c49d064c4eb08adb734ac4d116/method:9.2.0.86 AS cortex_agent
 
 FROM nginx:1.27
 
@@ -22,14 +22,14 @@ COPY --from=cortex_agent /etc/ssl/certs/ /etc/ssl/certs/
 COPY --from=cortex_agent /usr/share/ca-certificates/ /usr/share/ca-certificates/
 
 ENV XDR_CA_CERTS_LOCATION="/etc/ssl/certs/ca-certificates.crt" \
-    XDR_INIT_ROOT_DIR="/etc/panw-init" \
-    XDR_DISTRIBUTION_ID="94b9b95de7b14952ba1dc3cc7873787d" \
-    XDR_CONTAINER_MODE="embeddedcontainer" \
-    XDR_DISTRIBUTION_SERVER="https://distributions.traps.paloaltonetworks.com"
+  XDR_INIT_ROOT_DIR="/etc/panw-init" \
+  XDR_DISTRIBUTION_ID="805924c49d064c4eb08adb734ac4d116" \
+  XDR_CONTAINER_MODE="embeddedcontainer" \
+  XDR_DISTRIBUTION_SERVER="https://distributions.traps.paloaltonetworks.com"
 
 RUN mkdir -p /usr/lib/ssl/certs && \
-    ln -sf /etc/ssl/certs/ca-certificates.crt /usr/lib/ssl/cert.pem && \
-    ln -sf /etc/ssl/certs /usr/lib/ssl/certs
+  ln -sf /etc/ssl/certs/ca-certificates.crt /usr/lib/ssl/cert.pem && \
+  ln -sf /etc/ssl/certs /usr/lib/ssl/certs
 
 RUN ln -sf /opt/traps/bin/initd /initd
 RUN mkdir -p /etc/panw && echo '["nginx", "-g", "daemon off;"]' > /etc/panw/dypd_entry && chmod 666 /etc/panw/dypd_entry
