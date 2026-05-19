@@ -13,8 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /run/php /var/log/supervisor
 
-RUN docker-php-ext-install pdo pdo_sqlite
-
 RUN rm -f /etc/nginx/sites-enabled/default
 COPY nginx.conf       /etc/nginx/nginx.conf
 COPY supervisord.conf /etc/supervisor/conf.d/services.conf
