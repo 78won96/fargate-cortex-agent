@@ -21,11 +21,11 @@ Parameters:
     Default: 80
   Cpu:
     Type: String
-    Default: '256'
+    Default: '1024'
     AllowedValues: ['256', '512', '1024', '2048', '4096']
   Memory:
     Type: String
-    Default: '512'
+    Default: '2048'
     AllowedValues: ['512', '1024', '2048', '3072', '4096', '8192']
 
 Resources:
@@ -50,18 +50,14 @@ Resources:
         - Name: nginx
           Image: !Ref ImageUri
           Essential: true
+          LinuxParameters:
+            Capabilities:
+              Add:
+                - SYS_PTRACE
           PortMappings:
             - ContainerPort: !Ref ContainerPort
               Protocol: tcp
               AppProtocol: http
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - wget -qO- http://localhost/health || exit 1
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 10
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -82,7 +78,7 @@ Resources:
       PlatformVersion: LATEST
       EnableExecuteCommand: true
       PropagateTags: SERVICE
-      HealthCheckGracePeriodSeconds: 30
+      HealthCheckGracePeriodSeconds: 60
       DeploymentConfiguration:
         MaximumPercent: 200
         MinimumHealthyPercent: 100
